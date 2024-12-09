@@ -4,7 +4,7 @@ use bevy_ecs::{
     system::{Commands, Res, Resource},
     world::World,
 };
-use bevy_render::render_graph::{RenderGraph, RenderLabel};
+use bevy_render::render_graph::RenderLabel;
 use bevy_render::renderer::{RenderDevice, RenderQueue};
 use bevy_render::{
     render_graph::{Node, NodeRunError, RenderGraphContext},
@@ -14,7 +14,6 @@ use bevy_render::{
 };
 use bevy_window::Window;
 use iced_core::Size;
-use iced_wgpu::wgpu::util::StagingBelt;
 use iced_wgpu::wgpu::TextureFormat;
 use iced_widget::graphics::Viewport;
 
@@ -23,9 +22,6 @@ use crate::{DidDraw, IcedProps, IcedResource, IcedSettings};
 #[derive(Clone, Hash, Debug, Eq, PartialEq, RenderLabel)]
 pub struct IcedPass;
 
-#[cfg(target_arch = "wasm32")]
-pub const TEXTURE_FMT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
-#[cfg(not(target_arch = "wasm32"))]
 pub const TEXTURE_FMT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
 #[derive(Resource, Deref, DerefMut, Clone)]

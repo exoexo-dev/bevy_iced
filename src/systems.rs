@@ -98,19 +98,20 @@ pub fn process_input(
                 let physical_key = conversions::key_code(ev.key_code);
                 if ev.state.is_pressed() {
                     KeyPressed {
+                        // NOTE: This is supposed to be the "unmodified" key, but we don't get it from bevy events
                         key: key.clone(),
+                        text: conversions::key_text(&key),
+                        physical_key,
+                        modified_key: key,
                         modifiers,
                         // NOTE: This is a winit thing we don't get from bevy events
                         location: keyboard::Location::Standard,
-                        text: None,
-                        modified_key: key,
-                        physical_key: physical_key,
                     }
                 } else {
                     KeyReleased {
                         key: key.clone(),
                         modified_key: key,
-                        physical_key: physical_key,
+                        physical_key,
                         modifiers,
                         // NOTE: This is a winit thing we don't get from bevy events
                         location: keyboard::Location::Standard,

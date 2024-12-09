@@ -30,7 +30,6 @@
 
 use std::any::{Any, TypeId};
 
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -129,22 +128,18 @@ impl IcedProps {
             .unwrap()
             .wgpu_device();
         let queue = render_world.get_resource::<RenderQueue>().unwrap();
-        // let mut backend =
-        //     iced_wgpu::Backend::new(device, queue.as_ref(), config.settings, render::TEXTURE_FMT);
-        // for font in &config.fonts {
-        //     backend.load_font(Cow::Borrowed(*font));
-        // }
 
         let adapter = render_world.get_resource::<RenderAdapter>().unwrap();
 
-        let engine = iced_wgpu::Engine::new(&adapter, device, queue, TEXTURE_FMT, None);
+        let engine = iced_wgpu::Engine::new(
+            &adapter,
+            device,
+            queue,
+            TEXTURE_FMT,
+            Some(iced_wgpu::graphics::Antialiasing::MSAAx4),
+        );
 
         Self {
-            // renderer: Renderer::Wgpu(iced_wgpu::Renderer::new(
-            //     backend,
-            //     config.settings.default_font,
-            //     config.settings.default_text_size,
-            // )),
             renderer: iced_wgpu::Renderer::new(
                 device,
                 &engine,

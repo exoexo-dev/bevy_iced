@@ -6,10 +6,24 @@ use bevy_input::keyboard::{Key as BevyKey, NativeKeyCode as BevyNativeCode};
 use bevy_input::prelude::MouseButton;
 use bevy_input::touch::{TouchInput, TouchPhase};
 use bevy_math::Vec2;
-use iced_core::keyboard::{
-    key::{Code, NativeCode as IcedNativeCode, Physical},
-    Key as IcedKey,
+use iced_core::{
+    keyboard::{
+        key::{Code, Named as IcedNamed, NativeCode as IcedNativeCode, Physical},
+        Key as IcedKey,
+    },
+    SmolStr,
 };
+
+pub fn key_text(key: &IcedKey) -> Option<SmolStr> {
+    match key {
+        IcedKey::Named(named) => match named {
+            IcedNamed::Space => Some(" ".into()),
+            _ => None,
+        },
+        IcedKey::Character(c) => Some(c.clone()),
+        IcedKey::Unidentified => None,
+    }
+}
 
 pub fn key_code(key_code: bevy_input::keyboard::KeyCode) -> Physical {
     use bevy_input::keyboard::KeyCode;
