@@ -30,29 +30,35 @@
 
 use std::any::{Any, TypeId};
 
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::render::{extract_iced_data, IcedNode, ViewportResource};
+use crate::render::{extract_iced_data, IcedNode};
 
-use bevy_app::{App, Plugin, Update};
+use bevy_app::{App, Plugin, PreUpdate};
 use bevy_derive::{Deref, DerefMut};
-use bevy_ecs::prelude::{EventWriter, Query, With};
+use bevy_ecs::component::Component;
+use bevy_ecs::entity::Entity;
+use bevy_ecs::event::EventReader;
+use bevy_ecs::prelude::{EventWriter, Query};
+use bevy_ecs::query::With;
 use bevy_ecs::schedule::IntoSystemConfigs;
-use bevy_ecs::system::{NonSendMut, Res, ResMut, Resource, SystemParam};
+use bevy_ecs::system::{Commands, NonSendMut, Res, ResMut, Resource, SystemParam};
 use bevy_input::touch::Touches;
 use bevy_render::render_graph::RenderGraph;
 use bevy_render::renderer::{render_system, RenderAdapter, RenderDevice, RenderQueue};
 use bevy_render::{ExtractSchedule, Render, RenderApp, RenderSet};
 use bevy_utils::HashMap;
-use bevy_window::{PrimaryWindow, Window};
+use bevy_window::{PrimaryWindow, Window, WindowClosed, WindowCreated, WindowResized};
 use iced_core::mouse::Cursor;
+use iced_core::Size;
 use iced_core::Theme;
 use iced_runtime::user_interface::UserInterface;
 use iced_wgpu::Engine;
 // use iced_widget::graphics::backend::Text;
-use iced_widget::graphics::Viewport;
 // use iced_widget::style::Theme;
+use iced_wgpu::graphics::Viewport;
 
 /// Basic re-exports for all Iced-related stuff.
 ///
@@ -73,8 +79,13 @@ pub type Renderer = iced_renderer::Renderer;
 
 /// The main feature of `bevy_iced`.
 /// Add this to your [`App`] by calling `app.add_plugin(bevy_iced::IcedPlugin::default())`.
-#[derive(Default)]
-pub struct IcedPlugin {
+#[derive(Debug, Default)]
+pub struct IcedPlugin;
+
+/// Iced settings and fonts. Note that changes to this resource will not
+/// affected windows that are already opened.
+#[derive(Debug, Default, Resource)]
+pub struct IcedSetup {
     /// The settings that Iced should use.
     pub settings: iced::Settings,
     /// Font file contents
@@ -83,24 +94,49 @@ pub struct IcedPlugin {
 
 impl Plugin for IcedPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (systems::process_input, render::update_viewport))
-            .insert_resource(DidDraw::default())
-            .insert_resource(IcedSettings::default())
-            .insert_non_send_resource(IcedCache::default())
-            .insert_resource(IcedEventQueue::default());
+        app.add_systems(
+            PreUpdate,
+            (
+                systems::process_input,
+                handle_window_created,
+                handle_window_resized,
+                handle_window_closed,
+            ),
+        )
+        .insert_resource(IcedSetup::default())
+        .insert_resource(IcedSettings::default())
+        .insert_non_send_resource(IcedCache::default())
+        .insert_resource(IcedEventQueue::default());
     }
 
     fn finish(&self, app: &mut App) {
-        let default_viewport = Viewport::with_physical_size(iced_core::Size::new(1600, 900), 1.0);
-        let default_viewport = ViewportResource(default_viewport);
-        let iced_resource: IcedResource = IcedProps::new(app, self).into();
+        let render_world = app.sub_app(RenderApp).world();
 
-        app.insert_resource(default_viewport.clone())
-            .insert_resource(iced_resource.clone());
+        let adapter = render_world.get_resource::<RenderAdapter>().unwrap();
+        let device = render_world
+            .get_resource::<RenderDevice>()
+            .unwrap()
+            .wgpu_device();
+        let queue = render_world.get_resource::<RenderQueue>().unwrap();
+        let engine = iced_wgpu::Engine::new(
+            &adapter,
+            device,
+            queue,
+            TEXTURE_FMT,
+            Some(iced_wgpu::graphics::Antialiasing::MSAAx4),
+        );
+        let iced_resource = IcedResource::from(IcedProps { engine });
+
+        let renderers = IcedRenderers(HashMap::default());
+
+        app.insert_resource(iced_resource.clone())
+            .insert_resource(renderers)
+            .insert_resource(IcedState {
+                clipboard: iced_core::clipboard::Null,
+            });
 
         let render_app = app.sub_app_mut(RenderApp);
         render_app
-            .insert_resource(default_viewport)
             .insert_resource(iced_resource)
             .add_systems(ExtractSchedule, extract_iced_data)
             .add_systems(
@@ -113,44 +149,20 @@ impl Plugin for IcedPlugin {
     }
 }
 
-struct IcedProps {
-    pub engine: Engine,
-    renderer: Renderer,
-    debug: iced_runtime::Debug,
-    clipboard: iced_core::clipboard::Null,
+/// This component is attached to a window
+#[derive(Component, Debug, Deref, DerefMut, Clone)]
+pub struct WindowViewport(pub Viewport);
+
+struct IcedRenderer(Renderer);
+
+impl std::fmt::Debug for IcedRenderer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IcedRenderer").finish()
+    }
 }
 
-impl IcedProps {
-    fn new(app: &App, config: &IcedPlugin) -> Self {
-        let render_world = &app.sub_app(RenderApp).world();
-        let device = render_world
-            .get_resource::<RenderDevice>()
-            .unwrap()
-            .wgpu_device();
-        let queue = render_world.get_resource::<RenderQueue>().unwrap();
-
-        let adapter = render_world.get_resource::<RenderAdapter>().unwrap();
-
-        let engine = iced_wgpu::Engine::new(
-            &adapter,
-            device,
-            queue,
-            TEXTURE_FMT,
-            Some(iced_wgpu::graphics::Antialiasing::MSAAx4),
-        );
-
-        Self {
-            renderer: iced_wgpu::Renderer::new(
-                device,
-                &engine,
-                config.settings.default_font,
-                config.settings.default_text_size,
-            ),
-            engine,
-            debug: iced_runtime::Debug::new(),
-            clipboard: iced_core::clipboard::Null,
-        }
-    }
+struct IcedProps {
+    pub engine: Engine,
 }
 
 #[derive(Resource, Clone)]
@@ -167,6 +179,14 @@ impl From<IcedProps> for IcedResource {
         Self(Arc::new(Mutex::new(value)))
     }
 }
+
+#[derive(Debug, Resource)]
+struct IcedState {
+    clipboard: iced_core::clipboard::Null,
+}
+
+#[derive(Resource, Clone, Debug, Deref, DerefMut)]
+struct IcedRenderers(HashMap<Entity, Arc<Mutex<IcedRenderer>>>);
 
 fn setup_pipeline(graph: &mut RenderGraph) {
     graph.add_node(render::IcedPass, IcedNode);
@@ -221,8 +241,8 @@ impl Default for IcedSettings {
 }
 
 // An atomic flag for updating the draw state.
-#[derive(Resource, Deref, DerefMut, Default)]
-pub(crate) struct DidDraw(std::sync::atomic::AtomicBool);
+#[derive(Component, Clone, Debug, Default, Deref, DerefMut)]
+pub(crate) struct DidDraw(Arc<AtomicBool>);
 
 /// The context for interacting with Iced. Add this as a parameter to your system.
 /// ```ignore
@@ -236,34 +256,33 @@ pub(crate) struct DidDraw(std::sync::atomic::AtomicBool);
 /// Do so by invoking `app.add_event::<T>()` when constructing your App.
 #[derive(SystemParam)]
 pub struct IcedContext<'w, 's, Message: bevy_ecs::event::Event> {
-    viewport: Res<'w, ViewportResource>,
-    props: Res<'w, IcedResource>,
+    renderers: ResMut<'w, IcedRenderers>,
+    state: ResMut<'w, IcedState>,
     settings: Res<'w, IcedSettings>,
-    windows: Query<'w, 's, &'static Window, With<PrimaryWindow>>,
+    resource: Res<'w, IcedResource>,
+    primary_window: Query<'w, 's, Entity, (With<PrimaryWindow>, With<WindowViewport>)>,
+    windows: Query<'w, 's, (&'static Window, &'static WindowViewport, &'static DidDraw)>,
     events: ResMut<'w, IcedEventQueue>,
     cache_map: NonSendMut<'w, IcedCache>,
     messages: EventWriter<'w, Message>,
-    did_draw: ResMut<'w, DidDraw>,
     touches: Res<'w, Touches>,
+    device: Res<'w, RenderDevice>,
+    setup: Res<'w, IcedSetup>,
 }
 
 impl<'w, 's, M: bevy_ecs::event::Event> IcedContext<'w, 's, M> {
-    /// Display an [`Element`] to the screen.
-    pub fn display<'a>(
+    /// Display an [`Element`] in the given window.
+    pub fn display_in_window<'a>(
         &'a mut self,
         element: impl Into<iced_core::Element<'a, M, Theme, Renderer>>,
+        window_entity: Entity,
     ) {
-        let IcedProps {
-            ref mut renderer,
-            ref mut clipboard,
-            ..
-        } = &mut *self.props.lock().unwrap();
-        let bounds = self.viewport.logical_size();
+        let (window, viewport, did_draw) = self.windows.get(window_entity).unwrap();
+        let bounds = viewport.logical_size();
 
         let element = element.into();
 
         let cursor = {
-            let window = self.windows.single();
             match window.cursor_position() {
                 Some(position) => {
                     Cursor::Available(utils::process_cursor_position(position, bounds, window))
@@ -276,25 +295,114 @@ impl<'w, 's, M: bevy_ecs::event::Event> IcedContext<'w, 's, M> {
 
         let mut messages = Vec::<M>::new();
         let cache_entry = self.cache_map.get::<M>();
-        let cache = cache_entry.take().unwrap();
-        let mut ui = UserInterface::build(element, bounds, cache, renderer);
-        let (_, _event_statuses) = ui.update(
-            self.events.as_slice(),
-            cursor,
-            renderer,
-            clipboard,
-            &mut messages,
-        );
+        let cache = cache_entry.take().unwrap_or_default();
 
-        messages.into_iter().for_each(|msg| {
-            self.messages.send(msg);
-        });
+        if !self.renderers.contains_key(&window_entity) {
+            let IcedProps { engine } = &*self.resource.lock().unwrap();
+            self.renderers.insert(
+                window_entity,
+                Arc::new(Mutex::new(init_iced_renderer(
+                    &self.device,
+                    &engine,
+                    &self.setup,
+                ))),
+            );
+        }
+        let renderer = self.renderers.get_mut(&window_entity).unwrap();
+        // Renderer lock scope
+        {
+            let IcedRenderer(renderer) = &mut *renderer.lock().unwrap();
+            let mut ui = UserInterface::build(element, bounds, cache, renderer);
+            let (_, _event_statuses) = ui.update(
+                self.events.as_slice(),
+                cursor,
+                renderer,
+                &mut self.state.clipboard,
+                &mut messages,
+            );
 
-        ui.draw(renderer, &self.settings.theme, &self.settings.style, cursor);
+            ui.draw(renderer, &self.settings.theme, &self.settings.style, cursor);
+            *cache_entry = Some(ui.into_cache());
+            did_draw.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
 
+        self.messages.send_batch(messages);
         self.events.clear();
-        *cache_entry = Some(ui.into_cache());
-        self.did_draw
-            .store(true, std::sync::atomic::Ordering::Relaxed);
     }
+
+    /// Display an [`Element`] in the primary window.
+    pub fn display<'a>(
+        &'a mut self,
+        element: impl Into<iced_core::Element<'a, M, Theme, Renderer>>,
+    ) {
+        if let Ok(window) = self.primary_window.get_single() {
+            self.display_in_window(element, window)
+        }
+    }
+}
+
+fn init_iced_renderer(device: &RenderDevice, engine: &Engine, setup: &IcedSetup) -> IcedRenderer {
+    let renderer = iced_wgpu::Renderer::new(
+        device.wgpu_device(),
+        engine,
+        setup.settings.default_font,
+        setup.settings.default_text_size,
+    );
+    IcedRenderer(renderer)
+}
+
+fn handle_window_created(
+    mut commands: Commands,
+    mut window: EventReader<WindowCreated>,
+    created_windows: Query<&Window>,
+    iced_settings: Res<IcedSettings>,
+) {
+    for WindowCreated { window } in window.read() {
+        commands
+            .entity(*window)
+            .insert(DidDraw::default())
+            .insert(get_window_viewport(
+                created_windows.get(*window).unwrap(),
+                &iced_settings,
+            ));
+    }
+}
+
+fn handle_window_resized(
+    mut commands: Commands,
+    mut window: EventReader<WindowResized>,
+    created_windows: Query<&Window>,
+    iced_settings: Res<IcedSettings>,
+) {
+    for WindowResized {
+        window,
+        width: _,
+        height: _,
+    } in window.read()
+    {
+        commands.entity(*window).insert(get_window_viewport(
+            created_windows.get(*window).unwrap(),
+            &iced_settings,
+        ));
+    }
+}
+
+fn handle_window_closed(
+    mut window: EventReader<WindowClosed>,
+    mut renderers: ResMut<IcedRenderers>,
+) {
+    for WindowClosed { window } in window.read() {
+        renderers.remove(window);
+    }
+}
+
+fn get_window_viewport(window: &Window, iced_settings: &IcedSettings) -> WindowViewport {
+    let scale_factor = iced_settings
+        .scale_factor
+        .unwrap_or(window.scale_factor().into());
+    let viewport = Viewport::with_physical_size(
+        Size::new(window.physical_width(), window.physical_height()),
+        scale_factor,
+    );
+    WindowViewport(viewport)
 }

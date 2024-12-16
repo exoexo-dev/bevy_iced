@@ -1,4 +1,5 @@
 use bevy_derive::{Deref, DerefMut};
+use bevy_ecs::entity::Entity;
 use bevy_ecs::prelude::Query;
 use bevy_ecs::{
     system::{Commands, Res, Resource},
@@ -12,50 +13,47 @@ use bevy_render::{
     view::ExtractedWindows,
     Extract,
 };
-use bevy_window::Window;
-use iced_core::Size;
+use bevy_utils::HashMap;
 use iced_wgpu::wgpu::TextureFormat;
 use iced_widget::graphics::Viewport;
 
-use crate::{DidDraw, IcedProps, IcedResource, IcedSettings};
+use crate::{DidDraw, IcedProps, IcedRenderer, IcedRenderers, IcedResource, WindowViewport};
 
 #[derive(Clone, Hash, Debug, Eq, PartialEq, RenderLabel)]
 pub struct IcedPass;
 
 pub const TEXTURE_FMT: TextureFormat = TextureFormat::Bgra8UnormSrgb;
 
-#[derive(Resource, Deref, DerefMut, Clone)]
-pub struct ViewportResource(pub Viewport);
+/// This resource is used to pass all the viewports attached to windows into
+/// the `RenderApp` sub app.
+#[derive(Debug, Deref, DerefMut, Clone, Resource)]
+pub struct ExtractedIcedWindows(HashMap<Entity, ExtractedIcedWindow>);
 
-pub fn update_viewport(
-    windows: Query<&Window>,
-    iced_settings: Res<IcedSettings>,
-    mut commands: Commands,
-) {
-    let window = windows.single();
-    let scale_factor = iced_settings
-        .scale_factor
-        .unwrap_or_else(|| window.scale_factor().into());
-    let viewport = Viewport::with_physical_size(
-        Size::new(window.physical_width(), window.physical_height()),
-        scale_factor,
-    );
-    commands.insert_resource(ViewportResource(viewport));
+#[derive(Debug, Clone)]
+pub struct ExtractedIcedWindow {
+    viewport: Viewport,
+    did_draw: bool,
 }
 
-// Same as DidDraw, but as a regular bool instead of an atomic.
-#[derive(Resource, Deref, DerefMut)]
-struct DidDrawBasic(bool);
-
-pub fn extract_iced_data(
+pub(crate) fn extract_iced_data(
     mut commands: Commands,
-    viewport: Extract<Res<ViewportResource>>,
-    did_draw: Extract<Res<DidDraw>>,
+    windows: Extract<Query<(Entity, &WindowViewport, &DidDraw)>>,
+    renderers: Extract<Res<IcedRenderers>>,
 ) {
-    commands.insert_resource(viewport.clone());
-    commands.insert_resource(DidDrawBasic(
-        did_draw.swap(false, std::sync::atomic::Ordering::Relaxed),
-    ));
+    let extracted_windows = windows
+        .iter()
+        .map(|(window, WindowViewport(viewport), did_draw)| {
+            (
+                window,
+                ExtractedIcedWindow {
+                    viewport: viewport.clone(),
+                    did_draw: did_draw.swap(false, std::sync::atomic::Ordering::Relaxed),
+                },
+            )
+        })
+        .collect();
+    commands.insert_resource(ExtractedIcedWindows(extracted_windows));
+    commands.insert_resource(renderers.clone());
 }
 
 pub fn recall_staging_belt(iced: Res<IcedResource>) {
@@ -71,43 +69,56 @@ impl Node for IcedNode {
         render_context: &mut RenderContext,
         world: &World,
     ) -> Result<(), NodeRunError> {
-        let Some(extracted_window) = world
-            .get_resource::<ExtractedWindows>()
-            .unwrap()
-            .windows
-            .values()
-            .next()
-        else {
-            return Ok(());
-        };
+        let windows = &world.get_resource::<ExtractedWindows>().unwrap().windows;
+        let ExtractedIcedWindows(extracted_windows) =
+            world.get_resource::<ExtractedIcedWindows>().unwrap();
 
-        let IcedProps {
-            renderer,
-            debug,
-            engine,
-            ..
-        } = &mut *world.resource::<IcedResource>().lock().unwrap();
-        let render_device = world.resource::<RenderDevice>().wgpu_device();
-        let render_queue = world.resource::<RenderQueue>();
-        let viewport = world.resource::<ViewportResource>();
+        let IcedProps { engine, .. } = &mut *world.resource::<IcedResource>().lock().unwrap();
 
-        if !world.get_resource::<DidDrawBasic>().is_some_and(|x| x.0) {
-            return Ok(());
+        // Render all windows with viewports
+        for (window_entity, ExtractedIcedWindow { viewport, did_draw }) in extracted_windows {
+            if !did_draw {
+                continue;
+            }
+
+            let Some(window) = windows.get(window_entity) else {
+                continue;
+            };
+            let render_device = world.resource::<RenderDevice>().wgpu_device();
+            let render_queue = world.resource::<RenderQueue>();
+
+            let view = window.swap_chain_texture_view.as_ref().unwrap();
+
+            // TODO: in iced App this is a debug overlay
+            let overlay_text: &[String] = &[];
+
+            let renderers = world.resource::<IcedRenderers>();
+            let renderer = renderers.get(window_entity);
+            match renderer {
+                // Nothing to draw in this window if there's no renderer
+                None => {
+                    continue;
+                }
+                Some(request_or_use) =>
+                // Renderer lock scope
+                {
+                    let IcedRenderer(renderer) = &mut *request_or_use.lock().unwrap();
+
+                    renderer.present(
+                        engine,
+                        render_device,
+                        render_queue,
+                        render_context.command_encoder(),
+                        None,
+                        TEXTURE_FMT,
+                        view,
+                        viewport,
+                        overlay_text,
+                    );
+                    engine.finish();
+                }
+            }
         }
-        if let Some(view) = &extracted_window.swap_chain_texture_view {
-            renderer.present(
-                engine,
-                render_device,
-                render_queue,
-                render_context.command_encoder(),
-                None,
-                TEXTURE_FMT,
-                view,
-                viewport,
-                &debug.overlay(),
-            );
-        }
-        engine.finish();
 
         Ok(())
     }
