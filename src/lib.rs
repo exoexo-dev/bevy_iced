@@ -110,6 +110,14 @@ impl Plugin for IcedPlugin {
     }
 
     fn finish(&self, app: &mut App) {
+        let setup = app.world().get_resource::<IcedSetup>().unwrap();
+        for font in setup.fonts.iter() {
+            iced_renderer::graphics::text::font_system()
+                .write()
+                .expect("Write to font system")
+                .load_font(std::borrow::Cow::from(*font));
+        }
+
         let render_world = app.sub_app(RenderApp).world();
 
         let adapter = render_world.get_resource::<RenderAdapter>().unwrap();
